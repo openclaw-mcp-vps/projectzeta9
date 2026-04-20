@@ -1,49 +1,40 @@
 import { NextResponse } from "next/server";
-import { z } from "zod";
 
-import { runDeadlineAnalysisJob } from "@/lib/alert-engine";
-import { acknowledgeAlert, getAlerts, getProjects } from "@/lib/db/store";
+import { sendAlertDigest, generateProjectAlerts } from "@/lib/alert-engine";
+import { enqueueDeadlineAnalysis } from "@/lib/deadline-jobs";
+import { requestHasPaidAccess } from "@/lib/paywall";
+import { publishRealtimeEvent } from "@/lib/redis";
+import { getAlerts, getProjects, saveAlerts } from "@/lib/store";
 
-export const runtime = "nodejs";
-
-export async function GET(request: Request) {
-  const url = new URL(request.url);
-
-  if (url.searchParams.get("refresh") === "true") {
-    await runDeadlineAnalysisJob();
+export async function GET(request: Request): Promise<NextResponse> {
+  if (!requestHasPaidAccess(request)) {
+    return NextResponse.json({ error: "Subscription required" }, { status: 402 });
   }
 
-  const [alerts, projects] = await Promise.all([getAlerts(), getProjects()]);
-
-  return NextResponse.json({
-    alerts,
-    projects,
-  });
+  const alerts = await getAlerts(30);
+  return NextResponse.json({ alerts });
 }
 
-const acknowledgeSchema = z.object({
-  alertId: z.string().min(1),
-});
-
-export async function PATCH(request: Request) {
-  try {
-    const parsed = acknowledgeSchema.safeParse(await request.json());
-
-    if (!parsed.success) {
-      return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
-    }
-
-    const updated = await acknowledgeAlert(parsed.data.alertId);
-
-    if (!updated) {
-      return NextResponse.json({ error: "Alert not found" }, { status: 404 });
-    }
-
-    return NextResponse.json({ alert: updated });
-  } catch {
-    return NextResponse.json(
-      { error: "Unable to acknowledge alert" },
-      { status: 500 },
-    );
+export async function POST(request: Request): Promise<NextResponse> {
+  if (!requestHasPaidAccess(request)) {
+    return NextResponse.json({ error: "Subscription required" }, { status: 402 });
   }
+
+  const projects = await getProjects();
+  const generated = generateProjectAlerts(projects);
+  const created = await saveAlerts(generated);
+  const queuedJobs = await enqueueDeadlineAnalysis(projects.map((project) => project.id));
+  const digestSent = await sendAlertDigest(created);
+
+  await publishRealtimeEvent("project-alerts", {
+    type: "alerts.generated",
+    count: created.length,
+    at: new Date().toISOString()
+  });
+
+  return NextResponse.json({
+    created: created.length,
+    queuedJobs,
+    digestSent
+  });
 }

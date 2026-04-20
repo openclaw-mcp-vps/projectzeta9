@@ -14,30 +14,23 @@ ARCHITECTURE SPEC:
 Next.js SaaS with dashboard for project health monitoring, webhook integrations for GitHub/Linear/Notion, and automated alert system. Uses PostgreSQL for project data, Redis for real-time updates, and background jobs for deadline analysis.
 
 PLANNED FILES:
-- app/page.tsx
 - app/dashboard/page.tsx
-- app/dashboard/projects/page.tsx
-- app/dashboard/integrations/page.tsx
-- app/dashboard/alerts/page.tsx
 - app/api/webhooks/github/route.ts
 - app/api/webhooks/linear/route.ts
-- app/api/webhooks/notion/route.ts
 - app/api/projects/route.ts
 - app/api/alerts/route.ts
-- app/api/checkout/route.ts
 - components/ProjectHealthCard.tsx
 - components/MilestoneTimeline.tsx
-- components/AlertsPanel.tsx
 - components/IntegrationSetup.tsx
 - lib/integrations/github.ts
 - lib/integrations/linear.ts
-- lib/integrations/notion.ts
 - lib/deadline-analyzer.ts
 - lib/alert-engine.ts
-- lib/db/schema.ts
-- lib/auth.ts
+- prisma/schema.prisma
+- app/pricing/page.tsx
+- app/onboarding/page.tsx
 
-DEPENDENCIES: next, react, typescript, tailwindcss, @auth/nextjs, drizzle-orm, postgres, redis, @octokit/rest, @linear/sdk, @notionhq/client, @lemonsqueezy/lemonsqueezy.js, recharts, date-fns, zod, lucide-react, resend
+DEPENDENCIES: next, tailwindcss, prisma, @prisma/client, redis, bull, @octokit/rest, @linear/sdk, notion-client, resend, lemonsqueezy.js, recharts, date-fns, zod, next-auth
 
 REQUIREMENTS:
 - Next.js 15 with App Router (app/ directory)

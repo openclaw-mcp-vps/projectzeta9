@@ -1,59 +1,80 @@
-import { LinearClient } from "@linear/sdk";
+import crypto from "crypto";
+import { addDays } from "date-fns";
 
-import type { IntegrationSignal } from "@/lib/types";
+import { env } from "@/lib/env";
+import type { ProjectInput, ProjectStatus } from "@/lib/types";
 
-export function createLinearClient(token = process.env.LINEAR_API_KEY): LinearClient | null {
-  if (!token) {
-    return null;
+function safeCompare(a: string, b: string): boolean {
+  const aBuffer = Buffer.from(a);
+  const bBuffer = Buffer.from(b);
+
+  if (aBuffer.length !== bBuffer.length) {
+    return false;
   }
 
-  return new LinearClient({ apiKey: token });
+  return crypto.timingSafeEqual(aBuffer, bBuffer);
 }
 
-export function extractLinearSignals(
-  payload: Record<string, unknown>,
-): IntegrationSignal[] {
-  const type = String(payload.type ?? "unknown");
-  const action = String(payload.action ?? "update");
-  const data = (payload.data as Record<string, unknown> | undefined) ?? {};
-  const state =
-    ((data.state as Record<string, unknown> | undefined)?.name as string | undefined) ??
-    "";
-
-  const projectHint =
-    (data.project as Record<string, unknown> | undefined)?.name?.toString() ??
-    (data.team as Record<string, unknown> | undefined)?.name?.toString() ??
-    "";
-
-  if (type === "Issue" && /blocked|stuck|on hold/i.test(state)) {
-    return [
-      {
-        severity: "critical",
-        title: "Linear issue blocked",
-        message: `${String(data.title ?? "Issue")} moved to ${state} (${action}).`,
-        projectHint,
-        blocker: `${String(data.identifier ?? "Issue")} is currently blocked in Linear.`,
-      },
-    ];
+export function verifyLinearSignature(rawBody: string, signature: string | null): boolean {
+  if (!env.LINEAR_WEBHOOK_SECRET) {
+    return true;
   }
 
-  if (type === "Project" && /off track|at risk/i.test(String(data.health ?? ""))) {
-    return [
-      {
-        severity: "warning",
-        title: "Linear project health warning",
-        message: `${String(data.name ?? "Project")} is marked ${String(data.health)} in Linear.`,
-        projectHint,
-      },
-    ];
+  if (!signature) {
+    return false;
   }
 
-  return [
-    {
-      severity: "info",
-      title: "Linear webhook received",
-      message: `Captured ${type} ${action} event for timeline analysis.`,
-      projectHint,
-    },
-  ];
+  const expected = crypto
+    .createHmac("sha256", env.LINEAR_WEBHOOK_SECRET)
+    .update(rawBody)
+    .digest("hex");
+
+  return safeCompare(expected, signature);
+}
+
+function statusFromLinearState(stateType: string | undefined): ProjectStatus {
+  if (stateType === "completed") {
+    return "on_track";
+  }
+
+  if (stateType === "started") {
+    return "at_risk";
+  }
+
+  return "off_track";
+}
+
+export function linearPayloadToProject(payload: Record<string, unknown>): ProjectInput {
+  const data = payload.data as
+    | {
+        identifier?: string;
+        title?: string;
+        dueDate?: string;
+        project?: { name?: string };
+        team?: { name?: string };
+        state?: { type?: string };
+      }
+    | undefined;
+
+  const title = data?.project?.name ?? data?.title ?? "Linear Initiative";
+  const dueDate = data?.dueDate ? new Date(data.dueDate).toISOString() : addDays(new Date(), 14).toISOString();
+  const status = statusFromLinearState(data?.state?.type);
+  const blockerCount = status === "off_track" ? 4 : status === "at_risk" ? 2 : 0;
+
+  return {
+    externalId: data?.identifier ?? title,
+    source: "linear",
+    name: title,
+    owner: data?.team?.name ?? "Linear Team",
+    status,
+    healthScore: status === "on_track" ? 88 : status === "at_risk" ? 63 : 37,
+    milestones: [
+      {
+        title: data?.title ?? "Resolve pending Linear issues",
+        dueDate,
+        completed: status === "on_track",
+        blockerCount
+      }
+    ]
+  };
 }

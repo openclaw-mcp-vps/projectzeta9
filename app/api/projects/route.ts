@@ -1,112 +1,94 @@
-import { randomUUID } from "node:crypto";
-
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { runDeadlineAnalysisJob } from "@/lib/alert-engine";
-import { analyzePortfolio } from "@/lib/deadline-analyzer";
-import { getProjects, upsertProject } from "@/lib/db/store";
+import { computeHealthScore, statusFromHealth } from "@/lib/deadline-analyzer";
+import { requestHasPaidAccess } from "@/lib/paywall";
+import { publishRealtimeEvent } from "@/lib/redis";
+import { getProjects, saveProject } from "@/lib/store";
 
-export const runtime = "nodejs";
-
-const milestoneSchema = z.object({
-  title: z.string().min(3),
-  dueDate: z.string().datetime(),
-  status: z
-    .enum(["planned", "on_track", "at_risk", "blocked", "complete"])
-    .default("planned"),
-  owner: z.string().min(2),
-  notes: z.string().optional(),
+const createProjectSchema = z.object({
+  source: z.enum(["manual", "github", "linear"]).default("manual"),
+  name: z.string().min(2).max(120),
+  owner: z.string().min(2).max(120),
+  milestones: z
+    .array(
+      z.object({
+        title: z.string().min(2).max(180),
+        dueDate: z.string().min(4),
+        completed: z.boolean().optional().default(false),
+        blockerCount: z.number().int().min(0).max(100).optional().default(0)
+      })
+    )
+    .min(1)
+    .max(30)
 });
 
-const projectSchema = z.object({
-  id: z.string().uuid().optional(),
-  name: z.string().min(3),
-  description: z.string().min(10),
-  startDate: z.string().datetime(),
-  targetDate: z.string().datetime(),
-  progress: z.number().int().min(0).max(100).optional(),
-  blockers: z.array(z.string()).optional(),
-  milestones: z.array(milestoneSchema).optional(),
-  metadata: z
-    .object({
-      owner: z.string().min(2),
-      team: z.string().min(2),
-      repoUrl: z.string().url().optional(),
-      linearProjectId: z.string().optional(),
-      notionPageId: z.string().optional(),
-    })
-    .optional(),
-});
+export async function GET(request: Request): Promise<NextResponse> {
+  if (!requestHasPaidAccess(request)) {
+    return NextResponse.json({ error: "Subscription required" }, { status: 402 });
+  }
 
-export async function GET() {
   const projects = await getProjects();
-  const portfolio = analyzePortfolio(projects);
 
   return NextResponse.json({
     projects,
-    portfolio,
+    summary: {
+      totalProjects: projects.length,
+      avgHealth:
+        projects.length > 0
+          ? Math.round(projects.reduce((sum, project) => sum + project.healthScore, 0) / projects.length)
+          : 0,
+      atRisk: projects.filter((project) => project.status !== "on_track").length
+    }
   });
 }
 
-export async function POST(request: Request) {
-  try {
-    const json = (await request.json()) as unknown;
-    const parsed = projectSchema.safeParse(json);
+export async function POST(request: Request): Promise<NextResponse> {
+  if (!requestHasPaidAccess(request)) {
+    return NextResponse.json({ error: "Subscription required" }, { status: 402 });
+  }
 
-    if (!parsed.success) {
-      return NextResponse.json(
-        {
-          error: "Invalid project payload",
-          details: parsed.error.flatten(),
-        },
-        { status: 400 },
-      );
-    }
+  const json = (await request.json()) as unknown;
+  const parsed = createProjectSchema.safeParse(json);
 
-    const project = parsed.data;
-
-    if (new Date(project.targetDate).getTime() <= new Date(project.startDate).getTime()) {
-      return NextResponse.json(
-        {
-          error: "Target date must be later than start date.",
-        },
-        { status: 400 },
-      );
-    }
-
-    const saved = await upsertProject({
-      id: project.id,
-      name: project.name,
-      description: project.description,
-      startDate: project.startDate,
-      targetDate: project.targetDate,
-      progress: project.progress,
-      blockers: project.blockers,
-      milestones: (project.milestones ?? []).map((milestone) => ({
-        id: randomUUID(),
-        title: milestone.title,
-        dueDate: milestone.dueDate,
-        status: milestone.status,
-        owner: milestone.owner,
-        notes: milestone.notes,
-        completedAt:
-          milestone.status === "complete" ? new Date().toISOString() : undefined,
-      })),
-      metadata: project.metadata,
-    });
-
-    await runDeadlineAnalysisJob();
-
-    return NextResponse.json({
-      project: saved,
-    });
-  } catch {
+  if (!parsed.success) {
     return NextResponse.json(
       {
-        error: "Failed to create project",
+        error: "Invalid payload",
+        details: parsed.error.issues
       },
-      { status: 500 },
+      { status: 400 }
     );
   }
+
+  const normalizedMilestones = parsed.data.milestones.map((milestone) => ({
+    title: milestone.title,
+    dueDate: new Date(milestone.dueDate).toISOString(),
+    completed: milestone.completed,
+    blockerCount: milestone.blockerCount
+  }));
+
+  const healthScore = computeHealthScore(
+    normalizedMilestones.map((milestone, index) => ({
+      id: `preview-${index}`,
+      ...milestone
+    }))
+  );
+
+  const project = await saveProject({
+    source: parsed.data.source,
+    name: parsed.data.name,
+    owner: parsed.data.owner,
+    status: statusFromHealth(healthScore),
+    healthScore,
+    milestones: normalizedMilestones
+  });
+
+  await publishRealtimeEvent("project-updates", {
+    type: "project.created",
+    projectId: project.id,
+    at: new Date().toISOString()
+  });
+
+  return NextResponse.json({ project }, { status: 201 });
 }

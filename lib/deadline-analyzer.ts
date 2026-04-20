@@ -1,149 +1,79 @@
-import {
-  differenceInCalendarDays,
-  parseISO,
-  isBefore,
-  addDays,
-  differenceInDays,
-} from "date-fns";
+import { differenceInCalendarDays, isBefore, parseISO } from "date-fns";
 
-import { clamp } from "@/lib/utils";
-import type { Project, ProjectHealthAnalysis, RiskLevel } from "@/lib/types";
+import type { Milestone, Project, ProjectStatus } from "@/lib/types";
 
-const RISK_LABELS: Record<RiskLevel, string> = {
-  low: "Low risk",
-  medium: "Moderate risk",
-  high: "High risk",
-  critical: "Critical risk",
-};
-
-function riskLevelFromScore(score: number): RiskLevel {
-  if (score >= 80) {
-    return "critical";
-  }
-
-  if (score >= 60) {
-    return "high";
-  }
-
-  if (score >= 35) {
-    return "medium";
-  }
-
-  return "low";
-}
-
-function estimateDriftDays(project: Project): number {
-  const now = new Date();
-  const start = parseISO(project.startDate);
-  const target = parseISO(project.targetDate);
-  const elapsedDays = Math.max(1, differenceInDays(now, start));
-
-  const complete = project.milestones.filter(
-    (milestone) => milestone.status === "complete",
-  ).length;
-
-  const remaining = project.milestones.length - complete;
-
-  if (remaining <= 0) {
+function milestoneRisk(milestone: Milestone): number {
+  if (milestone.completed) {
     return 0;
   }
 
-  const throughputPerDay = Math.max(0.05, complete / elapsedDays);
-  const daysNeeded = remaining / throughputPerDay;
-  const daysLeft = Math.max(1, differenceInDays(target, now));
+  const dueDate = parseISO(milestone.dueDate);
+  const daysRemaining = differenceInCalendarDays(dueDate, new Date());
 
-  return Math.round(daysNeeded - daysLeft);
-}
+  let risk = 10;
 
-export function analyzeProjectHealth(project: Project): ProjectHealthAnalysis {
-  const now = new Date();
-  const soon = addDays(now, 7);
-
-  let overdueMilestones = 0;
-  let blockedMilestones = 0;
-  let upcomingMilestones = 0;
-
-  for (const milestone of project.milestones) {
-    const dueDate = parseISO(milestone.dueDate);
-    const isDone = milestone.status === "complete";
-
-    if (!isDone && isBefore(dueDate, now)) {
-      overdueMilestones += 1;
-    }
-
-    if (milestone.status === "blocked") {
-      blockedMilestones += 1;
-    }
-
-    if (!isDone && !isBefore(dueDate, now) && isBefore(dueDate, soon)) {
-      upcomingMilestones += 1;
-    }
+  if (daysRemaining <= 0) {
+    risk += 60;
+  } else if (daysRemaining <= 3) {
+    risk += 35;
+  } else if (daysRemaining <= 7) {
+    risk += 20;
   }
 
-  const daysToTarget = differenceInCalendarDays(parseISO(project.targetDate), now);
-  const blockerPenalty = project.blockers.length * 11;
-  const overduePenalty = overdueMilestones * 22;
-  const blockedPenalty = blockedMilestones * 24;
-  const nearTermPenalty = upcomingMilestones * 8;
-  const schedulePenalty = daysToTarget < 0 ? 30 : daysToTarget < 14 ? 12 : 0;
-  const progressPenalty = Math.max(0, 60 - project.progress) * 0.6;
+  risk += Math.min(milestone.blockerCount * 8, 30);
 
-  const riskScore = clamp(
-    Math.round(
-      blockerPenalty +
-        overduePenalty +
-        blockedPenalty +
-        nearTermPenalty +
-        schedulePenalty +
-        progressPenalty,
-    ),
-    0,
-    100,
-  );
-
-  const driftDays = estimateDriftDays(project);
-  const riskLevel = riskLevelFromScore(riskScore);
-
-  const summary =
-    driftDays > 0
-      ? `${RISK_LABELS[riskLevel]}: projected to slip by ${driftDays} day${
-          driftDays === 1 ? "" : "s"
-        } unless blockers are cleared.`
-      : `${RISK_LABELS[riskLevel]}: timeline is recoverable if upcoming milestones stay on track.`;
-
-  return {
-    projectId: project.id,
-    riskScore,
-    riskLevel,
-    overdueMilestones,
-    blockedMilestones,
-    upcomingMilestones,
-    driftDays,
-    summary,
-  };
+  return Math.min(risk, 100);
 }
 
-export function analyzePortfolio(projects: Project[]): {
-  generatedAt: string;
-  portfolioRisk: RiskLevel;
-  averageRiskScore: number;
-  blockedProjects: number;
-  analyses: ProjectHealthAnalysis[];
-} {
-  const analyses = projects.map(analyzeProjectHealth);
-  const totalScore = analyses.reduce((sum, item) => sum + item.riskScore, 0);
-  const averageRiskScore =
-    analyses.length === 0 ? 0 : Math.round(totalScore / analyses.length);
+export function computeHealthScore(milestones: Milestone[]): number {
+  if (milestones.length === 0) {
+    return 92;
+  }
 
-  const blockedProjects = analyses.filter(
-    (item) => item.blockedMilestones > 0 || item.overdueMilestones > 0,
+  const completionRate =
+    milestones.filter((milestone) => milestone.completed).length / milestones.length;
+  const avgRisk =
+    milestones.reduce((sum, milestone) => sum + milestoneRisk(milestone), 0) /
+    milestones.length;
+
+  const scoreFromCompletion = Math.round(completionRate * 60);
+  const scoreFromRisk = Math.max(0, 40 - Math.round(avgRisk * 0.4));
+
+  return Math.max(0, Math.min(100, scoreFromCompletion + scoreFromRisk));
+}
+
+export function statusFromHealth(healthScore: number): ProjectStatus {
+  if (healthScore >= 75) {
+    return "on_track";
+  }
+
+  if (healthScore >= 50) {
+    return "at_risk";
+  }
+
+  return "off_track";
+}
+
+export function analyzeProjectHealth(project: Project): {
+  status: ProjectStatus;
+  healthScore: number;
+  lateMilestones: number;
+  highRiskMilestones: number;
+} {
+  const lateMilestones = project.milestones.filter(
+    (milestone) => !milestone.completed && isBefore(parseISO(milestone.dueDate), new Date())
   ).length;
 
+  const highRiskMilestones = project.milestones.filter(
+    (milestone) => milestoneRisk(milestone) >= 45
+  ).length;
+
+  const healthScore = computeHealthScore(project.milestones);
+
   return {
-    generatedAt: new Date().toISOString(),
-    portfolioRisk: riskLevelFromScore(averageRiskScore),
-    averageRiskScore,
-    blockedProjects,
-    analyses,
+    status: statusFromHealth(healthScore),
+    healthScore,
+    lateMilestones,
+    highRiskMilestones
   };
 }

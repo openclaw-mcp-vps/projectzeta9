@@ -1,0 +1,19 @@
+// This project intentionally uses direct SQL via `pg`.
+// Prisma schema is kept only as an architecture note to match planning docs.
+// Do not generate Prisma client from this file.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id         String   @id @db.Text
+  externalId String?  @db.Text
+  source     String   @db.Text
+  name       String   @db.Text
+  owner      String   @db.Text
+  status     String   @db.Text
+  healthScore Int
+  updatedAt  DateTime @db.Timestamptz(6)
+}

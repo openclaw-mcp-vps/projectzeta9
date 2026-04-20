@@ -1,104 +1,135 @@
-import { AlertTriangle, FolderKanban, Radar, Sparkles } from "lucide-react";
+import type { Metadata } from "next";
+import Link from "next/link";
+import { redirect } from "next/navigation";
 
-import { PortfolioRiskChart } from "@/components/PortfolioRiskChart";
+import { MilestoneTimeline } from "@/components/MilestoneTimeline";
 import { ProjectHealthCard } from "@/components/ProjectHealthCard";
-import { analyzePortfolio } from "@/lib/deadline-analyzer";
-import { runDeadlineAnalysisJob } from "@/lib/alert-engine";
-import { getAlerts, getProjects } from "@/lib/db/store";
+import { RunAlertCycleButton } from "@/components/RunAlertCycleButton";
+import { Badge } from "@/components/ui/badge";
+import { buttonVariants } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { getAlerts, getProjects } from "@/lib/store";
+import { cn } from "@/lib/utils";
+import type { ProjectAlert } from "@/lib/types";
+import { hasPaidAccess } from "@/lib/paywall";
 
-export default async function DashboardHomePage() {
-  await runDeadlineAnalysisJob();
+export const metadata: Metadata = {
+  title: "Dashboard",
+  description:
+    "Monitor project health, milestone risk, and deadline alerts across GitHub and Linear in one engineering command center."
+};
 
-  const [projects, alerts] = await Promise.all([getProjects(), getAlerts()]);
-  const portfolio = analyzePortfolio(projects);
+const alertBadgeVariant: Record<ProjectAlert["severity"], "default" | "warning" | "danger"> = {
+  info: "default",
+  warning: "warning",
+  critical: "danger"
+};
 
-  const riskCounts = portfolio.analyses.reduce(
-    (acc, analysis) => {
-      acc[analysis.riskLevel] += 1;
-      return acc;
-    },
-    { low: 0, medium: 0, high: 0, critical: 0 },
-  );
+export default async function DashboardPage() {
+  const paid = await hasPaidAccess();
 
-  const analysisByProject = new Map(
-    portfolio.analyses.map((analysis) => [analysis.projectId, analysis]),
-  );
+  if (!paid) {
+    redirect("/pricing?locked=1");
+  }
+
+  const [projects, alerts] = await Promise.all([getProjects(), getAlerts(12)]);
+
+  const activeProjects = projects.length;
+  const atRiskCount = projects.filter((project) => project.status !== "on_track").length;
+  const avgHealth =
+    activeProjects > 0
+      ? Math.round(
+          projects.reduce((sum, project) => sum + project.healthScore, 0) /
+            activeProjects
+        )
+      : 0;
 
   return (
-    <div className="space-y-8">
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <article className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Average Risk</p>
-          <p className="mt-2 flex items-center text-3xl font-semibold text-slate-100">
-            <Radar className="mr-2 h-7 w-7 text-cyan-300" />
-            {portfolio.averageRiskScore}
+    <main className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
+      <div className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">Project Health Dashboard</h1>
+          <p className="mt-1 text-[#cbd5e1]">
+            Real-time visibility for milestone confidence, blocker load, and looming deadlines.
           </p>
-        </article>
-        <article className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Portfolio Risk</p>
-          <p className="mt-2 flex items-center text-3xl font-semibold text-slate-100">
-            <Sparkles className="mr-2 h-7 w-7 text-emerald-300" />
-            {portfolio.portfolioRisk}
-          </p>
-        </article>
-        <article className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Tracked Projects</p>
-          <p className="mt-2 flex items-center text-3xl font-semibold text-slate-100">
-            <FolderKanban className="mr-2 h-7 w-7 text-indigo-300" />
-            {projects.length}
-          </p>
-        </article>
-        <article className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-          <p className="text-xs uppercase tracking-wide text-slate-500">Active Alerts</p>
-          <p className="mt-2 flex items-center text-3xl font-semibold text-slate-100">
-            <AlertTriangle className="mr-2 h-7 w-7 text-amber-300" />
-            {alerts.filter((alert) => !alert.acknowledged).length}
-          </p>
-        </article>
+        </div>
+        <div className="flex gap-3">
+          <Link href="/onboarding" className={cn(buttonVariants({ variant: "secondary" }))}>
+            Add integrations
+          </Link>
+          <RunAlertCycleButton />
+        </div>
+      </div>
+
+      <section className="mb-6 grid gap-4 sm:grid-cols-3">
+        <Card className="bg-[#0f172a]/70">
+          <CardHeader>
+            <CardDescription>Tracked projects</CardDescription>
+            <CardTitle className="text-3xl">{activeProjects}</CardTitle>
+          </CardHeader>
+        </Card>
+        <Card className="bg-[#0f172a]/70">
+          <CardHeader>
+            <CardDescription>At risk or off track</CardDescription>
+            <CardTitle className="text-3xl">{atRiskCount}</CardTitle>
+          </CardHeader>
+        </Card>
+        <Card className="bg-[#0f172a]/70">
+          <CardHeader>
+            <CardDescription>Average health score</CardDescription>
+            <CardTitle className="text-3xl">{avgHealth}</CardTitle>
+          </CardHeader>
+        </Card>
       </section>
 
-      <section className="grid gap-4 lg:grid-cols-[1.25fr_0.75fr]">
-        <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-          <h2 className="text-lg font-semibold text-slate-100">Risk Distribution</h2>
-          <p className="mt-1 text-sm text-slate-400">
-            Live view of project risk states from the latest deadline analysis job.
-          </p>
-          <PortfolioRiskChart
-            low={riskCounts.low}
-            medium={riskCounts.medium}
-            high={riskCounts.high}
-            critical={riskCounts.critical}
-          />
-        </div>
-        <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-          <h2 className="text-lg font-semibold text-slate-100">Recent Alert Snapshot</h2>
-          <ul className="mt-3 space-y-3 text-sm text-slate-300">
-            {alerts.slice(0, 5).map((alert) => (
-              <li key={alert.id} className="rounded-lg border border-slate-800 bg-slate-900/60 p-3">
-                <p className="font-semibold text-slate-100">{alert.title}</p>
-                <p className="mt-1 text-slate-400">{alert.message}</p>
-              </li>
-            ))}
-          </ul>
-        </div>
+      <section className="mb-6 grid gap-4 lg:grid-cols-2">
+        {projects.map((project) => (
+          <ProjectHealthCard key={project.id} project={project} />
+        ))}
       </section>
 
-      <section className="space-y-4">
-        <h2 className="text-xl font-semibold text-slate-100">Project Health</h2>
-        <div className="grid gap-4 lg:grid-cols-2">
-          {projects.map((project) => {
-            const analysis = analysisByProject.get(project.id);
-
-            if (!analysis) {
-              return null;
-            }
-
-            return (
-              <ProjectHealthCard key={project.id} project={project} analysis={analysis} />
-            );
-          })}
-        </div>
+      <section className="mb-6 grid gap-4 lg:grid-cols-2">
+        {projects.slice(0, 2).map((project) => (
+          <MilestoneTimeline key={`${project.id}-timeline`} project={project} />
+        ))}
       </section>
-    </div>
+
+      <section className="grid gap-4 lg:grid-cols-2">
+        <Card className="bg-[#0f172a]/70">
+          <CardHeader>
+            <CardTitle>Recent alerts</CardTitle>
+            <CardDescription>Generated by deadline analysis and blocker severity checks.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {alerts.length === 0 ? (
+              <p className="text-sm text-[#94a3b8]">No alerts yet. Run an analysis cycle to generate the first signal.</p>
+            ) : (
+              alerts.map((alert) => (
+                <div key={alert.id} className="rounded-lg border border-[#1f2937] bg-[#0b1220] p-3 text-sm">
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <Badge variant={alertBadgeVariant[alert.severity]}>{alert.severity}</Badge>
+                    <span className="text-xs text-[#64748b]">{new Date(alert.createdAt).toLocaleString()}</span>
+                  </div>
+                  <p className="text-[#dbeafe]">{alert.message}</p>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="bg-[#0f172a]/70">
+          <CardHeader>
+            <CardTitle>Execution guidance</CardTitle>
+            <CardDescription>How high-performing teams use ProjectZeta9 day to day.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm text-[#cbd5e1]">
+            <p>1. Run analysis after every planning meeting and at each end-of-day handoff.</p>
+            <p>2. Route critical alerts to the project owner within 30 minutes.</p>
+            <p>3. Update milestone blockers in GitHub or Linear instead of editing status docs manually.</p>
+            <p>4. Review the at-risk list weekly and reset scope before deadlines are jeopardized.</p>
+          </CardContent>
+        </Card>
+      </section>
+    </main>
   );
 }

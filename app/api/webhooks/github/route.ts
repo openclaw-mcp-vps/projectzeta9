@@ -1,58 +1,39 @@
-import { createHmac } from "node:crypto";
-
 import { NextResponse } from "next/server";
 
-import {
-  extractGithubProjectHint,
-  extractGithubSignals,
-} from "@/lib/integrations/github";
-import { ingestIntegrationSignals } from "@/lib/integrations/ingest";
+import { computeHealthScore, statusFromHealth } from "@/lib/deadline-analyzer";
+import { githubPayloadToProject, verifyGitHubSignature } from "@/lib/integrations/github";
+import { publishRealtimeEvent } from "@/lib/redis";
+import { saveProject } from "@/lib/store";
 
-export const runtime = "nodejs";
-
-function verifyGithubSignature(rawBody: string, signature: string): boolean {
-  const secret = process.env.GITHUB_WEBHOOK_SECRET;
-  if (!secret) {
-    return true;
-  }
-
-  const digest = createHmac("sha256", secret).update(rawBody).digest("hex");
-  return signature === `sha256=${digest}`;
-}
-
-export async function POST(request: Request) {
+export async function POST(request: Request): Promise<NextResponse> {
   const rawBody = await request.text();
-  const signature = request.headers.get("x-hub-signature-256") ?? "";
+  const signature = request.headers.get("x-hub-signature-256");
 
-  if (!verifyGithubSignature(rawBody, signature)) {
-    return NextResponse.json({ error: "Invalid GitHub signature" }, { status: 401 });
+  if (!verifyGitHubSignature(rawBody, signature)) {
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
   }
 
-  const event = request.headers.get("x-github-event") ?? "unknown";
+  const payload = JSON.parse(rawBody) as Record<string, unknown>;
+  const projectInput = githubPayloadToProject(payload);
 
-  let payload: Record<string, unknown>;
-  try {
-    payload = JSON.parse(rawBody) as Record<string, unknown>;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const healthScore = computeHealthScore(
+    projectInput.milestones.map((milestone, index) => ({
+      id: `gh-${index}`,
+      ...milestone
+    }))
+  );
 
-  const signals = extractGithubSignals(event, payload);
-  const fallbackProjectHint = extractGithubProjectHint(payload);
-
-  const result = await ingestIntegrationSignals({
-    provider: "github",
-    status: event,
-    message: `${signals.length} signal(s) generated from ${event}`,
-    signals,
-    fallbackProjectHint,
+  const project = await saveProject({
+    ...projectInput,
+    healthScore,
+    status: statusFromHealth(healthScore)
   });
 
-  return NextResponse.json({
-    received: true,
-    provider: "github",
-    signals: signals.length,
-    alertsCreated: result.createdAlerts.length,
-    matchedProjects: result.matchedProjectCount,
+  await publishRealtimeEvent("project-updates", {
+    type: "github.webhook.received",
+    projectId: project.id,
+    at: new Date().toISOString()
   });
+
+  return NextResponse.json({ ok: true, projectId: project.id });
 }
